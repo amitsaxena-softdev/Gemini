@@ -94,7 +94,7 @@ def speak_text(text, voice_state):
 
 
 def listen_and_transcribe(recognizer, max_retries, retry_backoff):
-    attempts = 0
+    retries = 0
     while True:
         try:
             with sr.Microphone() as source:
@@ -120,11 +120,11 @@ def listen_and_transcribe(recognizer, max_retries, retry_backoff):
         except sr.UnknownValueError:
             print("Sorry, I couldn't understand that. Please try again.")
         except sr.RequestError as exc:
-            attempts += 1
             logger.warning("Speech recognition is unavailable right now: %s", exc)
-            if attempts > max_retries:
-                logger.error("Speech recognition failed after %s attempts.", attempts)
+            if retries >= max_retries:
+                logger.error("Speech recognition failed after %s attempts.", retries + 1)
                 return None
+            retries += 1
             print("Speech recognition is temporarily unavailable. Retrying...")
             time.sleep(retry_backoff)
 
@@ -151,7 +151,7 @@ def trim_history(history, max_turns):
 
 
 def generate_response(client, model, prompt, max_retries, retry_backoff, max_backoff):
-    attempts = 0
+    retries = 0
     while True:
         try:
             response = client.models.generate_content(model=model, contents=prompt)
@@ -164,10 +164,10 @@ def generate_response(client, model, prompt, max_retries, retry_backoff, max_bac
                 raise
             logger.warning("Gemini request failed: %s", exc)
 
-        attempts += 1
-        if attempts > max_retries:
+        if retries >= max_retries:
             return None
-        exponent = min(attempts - 1, MAX_BACKOFF_EXPONENT)
+        retries += 1
+        exponent = min(retries - 1, MAX_BACKOFF_EXPONENT)
         sleep_seconds = retry_backoff * (2 ** exponent)
         if max_backoff > 0:
             sleep_seconds = min(sleep_seconds, max_backoff)
