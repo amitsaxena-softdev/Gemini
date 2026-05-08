@@ -17,6 +17,7 @@ DEFAULT_MAX_GENERATION_RETRIES = 2
 DEFAULT_MAX_STT_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.5
 DEFAULT_MAX_RETRY_BACKOFF_SECONDS = 10.0
+MAX_BACKOFF_EXPONENT = 10
 RETRYABLE_EXCEPTION_MODULE_PREFIXES = ("google", "grpc", "httpx", "requests")
 RETRYABLE_EXCEPTIONS = (OSError, TimeoutError, ConnectionError)
 
@@ -152,26 +153,22 @@ def trim_history(history, max_turns):
 def generate_response(client, model, prompt, max_retries, retry_backoff, max_backoff):
     attempts = 0
     while True:
-        should_retry = False
         try:
             response = client.models.generate_content(model=model, contents=prompt)
             text = (response.text or "").strip()
             if text:
                 return text
             logger.warning("Gemini returned an empty response.")
-            should_retry = True
         except Exception as exc:
             if not is_retryable_exception(exc):
                 raise
             logger.warning("Gemini request failed: %s", exc)
-            should_retry = True
 
-        if not should_retry:
-            return None
         attempts += 1
         if attempts > max_retries:
             return None
-        sleep_seconds = retry_backoff * (2 ** (attempts - 1))
+        exponent = min(attempts - 1, MAX_BACKOFF_EXPONENT)
+        sleep_seconds = retry_backoff * (2 ** exponent)
         if max_backoff > 0:
             sleep_seconds = min(sleep_seconds, max_backoff)
         time.sleep(sleep_seconds)
