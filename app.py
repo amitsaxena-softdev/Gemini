@@ -1,6 +1,8 @@
+import logging
 import os
 import platform
 import subprocess
+import time
 
 from dotenv import load_dotenv
 from google import genai
@@ -10,6 +12,55 @@ load_dotenv()
 
 EXIT_COMMANDS = {"exit", "quit", "stop", "goodbye"}
 DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MAX_HISTORY_TURNS = 10
+DEFAULT_MAX_GENERATION_RETRIES = 2
+DEFAULT_MAX_STT_RETRIES = 3
+DEFAULT_RETRY_BACKOFF_SECONDS = 1.5
+VOICE_WARNING_SHOWN = False
+
+logger = logging.getLogger(__name__)
+
+
+def configure_logging():
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(level=level, format="%(levelname)s:%(name)s:%(message)s")
+
+
+def get_env_int(name, default, minimum=None, maximum=None):
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        logger.warning("%s must be an integer. Using %s.", name, default)
+        return default
+    if minimum is not None and value < minimum:
+        logger.warning("%s must be >= %s. Using %s.", name, minimum, default)
+        return default
+    if maximum is not None and value > maximum:
+        logger.warning("%s must be <= %s. Using %s.", name, maximum, default)
+        return default
+    return value
+
+
+def get_env_float(name, default, minimum=None, maximum=None):
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = float(raw_value)
+    except ValueError:
+        logger.warning("%s must be a number. Using %s.", name, default)
+        return default
+    if minimum is not None and value < minimum:
+        logger.warning("%s must be >= %s. Using %s.", name, minimum, default)
+        return default
+    if maximum is not None and value > maximum:
+        logger.warning("%s must be <= %s. Using %s.", name, maximum, default)
+        return default
+    return value
 
 
 def speak_text(text):
@@ -19,21 +70,29 @@ def speak_text(text):
     if platform.system() == "Darwin":
         try:
             subprocess.run(["say", text], check=True)
-        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-            print(f"AI voice playback failed: {exc}")
+        except (FileNotFoundError, subprocess.CalledProcessError, OSError) as exc:
+            logger.warning("AI voice playback failed: %s", exc)
     else:
-        print("AI voice playback is only configured for macOS right now.")
+        global VOICE_WARNING_SHOWN
+        if not VOICE_WARNING_SHOWN:
+            print("AI voice playback is only configured for macOS right now.")
+            VOICE_WARNING_SHOWN = True
 
 
-def listen_and_transcribe(recognizer):
+def listen_and_transcribe(recognizer, max_retries, retry_backoff):
+    attempts = 0
     while True:
-        with sr.Microphone() as source:
-            print("\nListening... Speak now!")
-            try:
-                audio = recognizer.listen(source, timeout=10, phrase_time_limit=20)
-            except sr.WaitTimeoutError:
-                print("I didn't hear anything. Let's try again.")
-                continue
+        try:
+            with sr.Microphone() as source:
+                print("\nListening... Speak now!")
+                try:
+                    audio = recognizer.listen(source, timeout=10, phrase_time_limit=20)
+                except sr.WaitTimeoutError:
+                    print("I didn't hear anything. Let's try again.")
+                    continue
+        except OSError as exc:
+            logger.error("Microphone error: %s", exc)
+            return None
 
         try:
             print("Processing your speech...")
@@ -47,12 +106,17 @@ def listen_and_transcribe(recognizer):
         except sr.UnknownValueError:
             print("Sorry, I couldn't understand that. Please try again.")
         except sr.RequestError as exc:
-            print(f"Speech recognition is unavailable right now: {exc}")
-            return None
+            attempts += 1
+            logger.warning("Speech recognition is unavailable right now: %s", exc)
+            if attempts > max_retries:
+                logger.error("Speech recognition failed after %s attempts.", attempts)
+                return None
+            print("Speech recognition is temporarily unavailable. Retrying...")
+            time.sleep(retry_backoff)
 
 
 def build_prompt(history, latest_user_input):
-    transcript = "\n".join(history)
+    transcript = "\n".join(history) if history else "No previous conversation."
     return (
         "You are in a live spoken conversation with a user. "
         "Reply naturally, keep answers concise unless asked for detail, "
@@ -63,7 +127,35 @@ def build_prompt(history, latest_user_input):
     )
 
 
+def trim_history(history, max_turns):
+    if max_turns <= 0:
+        return []
+    max_entries = max_turns * 2
+    if len(history) <= max_entries:
+        return history
+    return history[-max_entries:]
+
+
+def generate_response(client, model, prompt, max_retries, retry_backoff):
+    attempts = 0
+    while True:
+        try:
+            response = client.models.generate_content(model=model, contents=prompt)
+            text = (response.text or "").strip()
+            if text:
+                return text
+            logger.warning("Gemini returned an empty response.")
+        except Exception as exc:
+            logger.warning("Gemini request failed: %s", exc)
+
+        attempts += 1
+        if attempts > max_retries:
+            return None
+        time.sleep(retry_backoff * attempts)
+
+
 def app():
+    configure_logging()
     recognizer = sr.Recognizer()
     recognizer.pause_threshold = 0.8
     recognizer.non_speaking_duration = 0.5
@@ -74,16 +166,28 @@ def app():
 
     client = genai.Client(api_key=api_key)
     model = os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
+    max_history_turns = get_env_int("MAX_HISTORY_TURNS", DEFAULT_MAX_HISTORY_TURNS, minimum=0)
+    max_generation_retries = get_env_int(
+        "MAX_GENERATION_RETRIES", DEFAULT_MAX_GENERATION_RETRIES, minimum=0
+    )
+    max_stt_retries = get_env_int("MAX_STT_RETRIES", DEFAULT_MAX_STT_RETRIES, minimum=0)
+    retry_backoff = get_env_float(
+        "RETRY_BACKOFF_SECONDS", DEFAULT_RETRY_BACKOFF_SECONDS, minimum=0
+    )
 
-    with sr.Microphone() as source:
-        print("Adjusting for background noise... one second.")
-        recognizer.adjust_for_ambient_noise(source, duration=1)
+    try:
+        with sr.Microphone() as source:
+            print("Adjusting for background noise... one second.")
+            recognizer.adjust_for_ambient_noise(source, duration=1)
+    except OSError as exc:
+        logger.error("Microphone error during setup: %s", exc)
+        return
 
     print("Voice chat is ready. Say 'exit', 'quit', or 'stop' to end the session.")
     conversation_history = []
 
     while True:
-        user_input = listen_and_transcribe(recognizer)
+        user_input = listen_and_transcribe(recognizer, max_stt_retries, retry_backoff)
         if user_input is None:
             break
 
@@ -92,9 +196,9 @@ def app():
             break
 
         prompt = build_prompt(conversation_history, user_input)
-        response = client.models.generate_content(model=model, contents=prompt)
-        ai_text = (response.text or "").strip()
-
+        ai_text = generate_response(
+            client, model, prompt, max_generation_retries, retry_backoff
+        )
         if not ai_text:
             ai_text = "I couldn't generate a response just now. Please try again."
 
@@ -103,6 +207,7 @@ def app():
 
         conversation_history.append(f"User: {user_input}")
         conversation_history.append(f"Assistant: {ai_text}")
+        conversation_history = trim_history(conversation_history, max_history_turns)
 
 
 if __name__ == "__main__":
