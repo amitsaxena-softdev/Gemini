@@ -69,7 +69,7 @@ def speak_text(text, voice_state):
     if platform.system() == "Darwin":
         try:
             subprocess.run(["say", text], check=True)
-        except (FileNotFoundError, subprocess.CalledProcessError, OSError) as exc:
+        except (OSError, subprocess.CalledProcessError) as exc:
             logger.warning("AI voice playback failed: %s", exc)
     else:
         if not voice_state.get("warned"):
@@ -149,7 +149,7 @@ def generate_response(client, model, prompt, max_retries, retry_backoff):
         attempts += 1
         if attempts > max_retries:
             return None
-        time.sleep(retry_backoff * (2 ** (attempts - 1)))
+        time.sleep(retry_backoff * (2 ** attempts))
 
 
 def app():
