@@ -17,7 +17,7 @@ DEFAULT_MAX_GENERATION_RETRIES = 2
 DEFAULT_MAX_STT_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.5
 DEFAULT_MAX_RETRY_BACKOFF_SECONDS = 10.0
-MAX_BACKOFF_EXPONENT = 10
+MAX_BACKOFF_EXPONENT = 6
 RETRYABLE_EXCEPTION_MODULE_PREFIXES = ("google", "grpc", "httpx", "requests")
 RETRYABLE_EXCEPTIONS = (OSError, TimeoutError, ConnectionError)
 
@@ -94,7 +94,8 @@ def speak_text(text, voice_state):
 
 
 def listen_and_transcribe(recognizer, max_retries, retry_backoff):
-    retries = 0
+    max_attempts = max_retries + 1
+    attempt_count = 0
     while True:
         try:
             with sr.Microphone() as source:
@@ -121,10 +122,10 @@ def listen_and_transcribe(recognizer, max_retries, retry_backoff):
             print("Sorry, I couldn't understand that. Please try again.")
         except sr.RequestError as exc:
             logger.warning("Speech recognition is unavailable right now: %s", exc)
-            if retries >= max_retries:
-                logger.error("Speech recognition failed after %s attempts.", retries + 1)
+            attempt_count += 1
+            if attempt_count >= max_attempts:
+                logger.error("Speech recognition failed after %s attempts.", attempt_count)
                 return None
-            retries += 1
             print("Speech recognition is temporarily unavailable. Retrying...")
             time.sleep(retry_backoff)
 
@@ -151,8 +152,10 @@ def trim_history(history, max_turns):
 
 
 def generate_response(client, model, prompt, max_retries, retry_backoff, max_backoff):
-    retries = 0
+    max_attempts = max_retries + 1
+    attempt_count = 0
     while True:
+        attempt_count += 1
         try:
             response = client.models.generate_content(model=model, contents=prompt)
             text = (response.text or "").strip()
@@ -164,10 +167,9 @@ def generate_response(client, model, prompt, max_retries, retry_backoff, max_bac
                 raise
             logger.warning("Gemini request failed: %s", exc)
 
-        if retries >= max_retries:
+        if attempt_count >= max_attempts:
             return None
-        retries += 1
-        exponent = min(retries - 1, MAX_BACKOFF_EXPONENT)
+        exponent = min(attempt_count, MAX_BACKOFF_EXPONENT)
         sleep_seconds = retry_backoff * (2 ** exponent)
         if max_backoff > 0:
             sleep_seconds = min(sleep_seconds, max_backoff)
