@@ -16,7 +16,6 @@ DEFAULT_MAX_HISTORY_TURNS = 10
 DEFAULT_MAX_GENERATION_RETRIES = 2
 DEFAULT_MAX_STT_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.5
-VOICE_WARNING_SHOWN = False
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +62,7 @@ def get_env_float(name, default, minimum=None, maximum=None):
     return value
 
 
-def speak_text(text):
+def speak_text(text, voice_state):
     if not text.strip():
         return
 
@@ -73,10 +72,9 @@ def speak_text(text):
         except (FileNotFoundError, subprocess.CalledProcessError, OSError) as exc:
             logger.warning("AI voice playback failed: %s", exc)
     else:
-        global VOICE_WARNING_SHOWN
-        if not VOICE_WARNING_SHOWN:
+        if not voice_state.get("warned"):
             print("AI voice playback is only configured for macOS right now.")
-            VOICE_WARNING_SHOWN = True
+            voice_state["warned"] = True
 
 
 def listen_and_transcribe(recognizer, max_retries, retry_backoff):
@@ -116,7 +114,7 @@ def listen_and_transcribe(recognizer, max_retries, retry_backoff):
 
 
 def build_prompt(history, latest_user_input):
-    transcript = "\n".join(history) if history else "No previous conversation."
+    transcript = "\n".join(history)
     return (
         "You are in a live spoken conversation with a user. "
         "Reply naturally, keep answers concise unless asked for detail, "
@@ -151,7 +149,7 @@ def generate_response(client, model, prompt, max_retries, retry_backoff):
         attempts += 1
         if attempts > max_retries:
             return None
-        time.sleep(retry_backoff * attempts)
+        time.sleep(retry_backoff * (2 ** (attempts - 1)))
 
 
 def app():
@@ -185,6 +183,7 @@ def app():
 
     print("Voice chat is ready. Say 'exit', 'quit', or 'stop' to end the session.")
     conversation_history = []
+    voice_state = {"warned": False}
 
     while True:
         user_input = listen_and_transcribe(recognizer, max_stt_retries, retry_backoff)
@@ -203,7 +202,7 @@ def app():
             ai_text = "I couldn't generate a response just now. Please try again."
 
         print(f"AI: {ai_text}")
-        speak_text(ai_text)
+        speak_text(ai_text, voice_state)
 
         conversation_history.append(f"User: {user_input}")
         conversation_history.append(f"Assistant: {ai_text}")
