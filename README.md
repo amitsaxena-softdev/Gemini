@@ -42,6 +42,7 @@ Optional environment variables:
 - `MAX_GENERATION_RETRIES` (default: `2`)
 - `MAX_STT_RETRIES` (default: `3`)
 - `RETRY_BACKOFF_SECONDS` (default: `1.5`)
+- `MAX_RETRY_BACKOFF_SECONDS` (default: `10.0`)
 - `LOG_LEVEL` (default: `INFO`)
 
 ## Notes

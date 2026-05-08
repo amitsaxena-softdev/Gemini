@@ -16,6 +16,7 @@ DEFAULT_MAX_HISTORY_TURNS = 10
 DEFAULT_MAX_GENERATION_RETRIES = 2
 DEFAULT_MAX_STT_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.5
+DEFAULT_MAX_RETRY_BACKOFF_SECONDS = 10.0
 RETRYABLE_EXCEPTION_MODULE_PREFIXES = ("google", "grpc", "httpx", "requests")
 RETRYABLE_EXCEPTIONS = (OSError, TimeoutError, ConnectionError)
 
@@ -68,7 +69,10 @@ def is_retryable_exception(exc):
     if isinstance(exc, RETRYABLE_EXCEPTIONS):
         return True
     module_name = exc.__class__.__module__
-    return module_name.startswith(RETRYABLE_EXCEPTION_MODULE_PREFIXES)
+    return any(
+        module_name == prefix or module_name.startswith(f"{prefix}.")
+        for prefix in RETRYABLE_EXCEPTION_MODULE_PREFIXES
+    )
 
 
 def speak_text(text, voice_state):
@@ -145,24 +149,31 @@ def trim_history(history, max_turns):
     return history[-max_entries:]
 
 
-def generate_response(client, model, prompt, max_retries, retry_backoff):
+def generate_response(client, model, prompt, max_retries, retry_backoff, max_backoff):
     attempts = 0
     while True:
+        should_retry = False
         try:
             response = client.models.generate_content(model=model, contents=prompt)
             text = (response.text or "").strip()
             if text:
                 return text
             logger.warning("Gemini returned an empty response.")
+            should_retry = True
         except Exception as exc:
             if not is_retryable_exception(exc):
                 raise
             logger.warning("Gemini request failed: %s", exc)
+            should_retry = True
 
+        if not should_retry:
+            return None
         attempts += 1
         if attempts > max_retries:
             return None
         sleep_seconds = retry_backoff * (2 ** (attempts - 1))
+        if max_backoff > 0:
+            sleep_seconds = min(sleep_seconds, max_backoff)
         time.sleep(sleep_seconds)
 
 
@@ -185,6 +196,9 @@ def app():
     max_stt_retries = get_env_int("MAX_STT_RETRIES", DEFAULT_MAX_STT_RETRIES, minimum=0)
     retry_backoff = get_env_float(
         "RETRY_BACKOFF_SECONDS", DEFAULT_RETRY_BACKOFF_SECONDS, minimum=0
+    )
+    max_retry_backoff = get_env_float(
+        "MAX_RETRY_BACKOFF_SECONDS", DEFAULT_MAX_RETRY_BACKOFF_SECONDS, minimum=0
     )
 
     try:
@@ -210,7 +224,12 @@ def app():
 
         prompt = build_prompt(conversation_history, user_input)
         ai_text = generate_response(
-            client, model, prompt, max_generation_retries, retry_backoff
+            client,
+            model,
+            prompt,
+            max_generation_retries,
+            retry_backoff,
+            max_retry_backoff,
         )
         if not ai_text:
             ai_text = "I couldn't generate a response just now. Please try again."
