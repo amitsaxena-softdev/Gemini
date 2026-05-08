@@ -16,6 +16,8 @@ DEFAULT_MAX_HISTORY_TURNS = 10
 DEFAULT_MAX_GENERATION_RETRIES = 2
 DEFAULT_MAX_STT_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.5
+RETRYABLE_EXCEPTION_MODULE_PREFIXES = ("google", "grpc", "httpx", "requests")
+RETRYABLE_EXCEPTIONS = (OSError, TimeoutError, ConnectionError)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,13 @@ def get_env_float(name, default, minimum=None, maximum=None):
     return value
 
 
+def is_retryable_exception(exc):
+    if isinstance(exc, RETRYABLE_EXCEPTIONS):
+        return True
+    module_name = exc.__class__.__module__
+    return module_name.startswith(RETRYABLE_EXCEPTION_MODULE_PREFIXES)
+
+
 def speak_text(text, voice_state):
     if not text.strip():
         return
@@ -69,6 +78,8 @@ def speak_text(text, voice_state):
     if platform.system() == "Darwin":
         try:
             subprocess.run(["say", text], check=True)
+        except FileNotFoundError as exc:
+            logger.warning("macOS say command not found: %s", exc)
         except (OSError, subprocess.CalledProcessError) as exc:
             logger.warning("AI voice playback failed: %s", exc)
     else:
@@ -144,12 +155,15 @@ def generate_response(client, model, prompt, max_retries, retry_backoff):
                 return text
             logger.warning("Gemini returned an empty response.")
         except Exception as exc:
+            if not is_retryable_exception(exc):
+                raise
             logger.warning("Gemini request failed: %s", exc)
 
         attempts += 1
         if attempts > max_retries:
             return None
-        time.sleep(retry_backoff * (2 ** attempts))
+        sleep_seconds = retry_backoff * (2 ** (attempts - 1))
+        time.sleep(sleep_seconds)
 
 
 def app():
